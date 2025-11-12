@@ -265,6 +265,10 @@ def focal_bce_with_logits(
     else:
         return loss
 
+def _set_lr(optimizer, lr: float):
+    for g in optimizer.param_groups:
+        g['lr'] = float(lr)
+
 # ----------------------------
 # Loss
 # ----------------------------
@@ -702,17 +706,34 @@ def train(args):
     idx_pos_by_cls, idx_empty = build_indices_by_class(ds)
     print({k:len(v) for k,v in idx_pos_by_cls.items()}, "empty:", len(idx_empty))
 
-    # split (GT中心でvalを確保)
-    pos_all = sorted(set().union(*idx_pos_by_cls.values()))
-    random.Random(args.seed).shuffle(pos_all)
-    nva_pos = max(1, int(0.15*len(pos_all)))
-    va_pos = set(pos_all[:nva_pos]); tr_pos = set(pos_all[nva_pos:])
-    nva_empty = max(0, int(0.05*len(idx_empty)))
-    va_empty = set(random.Random(args.seed+1).sample(idx_empty, nva_empty)) if nva_empty>0 else set()
+    pos_all = sorted(set().union(*idx_pos_by_cls.values())) if len(idx_pos_by_cls) > 0 else []
+
+    val_ratio = args.val_split  # 例: 0.20
+    rnd_pos   = random.Random(args.seed)
+    rnd_emp   = random.Random(args.seed + 1)
+
+    # 正例を含む画像の 8:2 分割
+    pos_all_shuf = list(pos_all)          # コピー
+    rnd_pos.shuffle(pos_all_shuf)
+    nva_pos = max(1, int(val_ratio * len(pos_all_shuf))) if len(pos_all_shuf) > 0 else 0
+    va_pos = set(pos_all_shuf[:nva_pos])
+    tr_pos = set(pos_all_shuf[nva_pos:])
+
+    # 空画像（アノテ無し）も同率で 8:2
+    nva_empty = int(val_ratio * len(idx_empty))
+    if nva_empty > 0:
+        va_empty = set(rnd_emp.sample(idx_empty, nva_empty))
+    else:
+        va_empty = set()
     tr_empty = set([i for i in idx_empty if i not in va_empty])
 
+    # 学習/検証の最終インデックス
     tr_idx = sorted(tr_pos.union(tr_empty))
     va_idx = sorted(va_pos.union(va_empty))
+
+    print(f"[split] train={len(tr_idx)}  val={len(va_idx)}  "
+        f"(pos_tr={len(tr_pos)}, pos_val={len(va_pos)}, "
+        f"empty_tr={len(tr_empty)}, empty_val={len(va_empty)})")
 
     ds_tr = torch.utils.data.Subset(ds, tr_idx)
     ds_va = torch.utils.data.Subset(ds, va_idx)
@@ -734,7 +755,7 @@ def train(args):
         # ds_tr_cur,
         ds_tr,  
         batch_size=args.batch_size, num_workers=args.workers,
-        shuffle=False, sampler=None, collate_fn=collate_fn, pin_memory=True,
+        shuffle=True, sampler=None, collate_fn=collate_fn, pin_memory=True,
         persistent_workers=True, prefetch_factor=4, worker_init_fn=_worker_init_fn,
     )
     dl_va = DataLoader(
@@ -763,7 +784,11 @@ def train(args):
         focal_obj=args.focal_obj, focal_cls=args.focal_cls,
         focal_gamma=args.focal_gamma, focal_alpha=args.focal_alpha
     ).to(device)
-    optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=5e-4)
+    optim = torch.optim.Adam(
+        model.parameters(), 
+        lr=args.init_lr, 
+        betas=(0.937, 0.999),
+        weight_decay=5e-4)
     scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
     ema = ModelEMA(model, decay=args.ema_decay) if args.ema else None
 
@@ -789,6 +814,14 @@ def train(args):
             csv.writer(f).writerow(header)
 
     for ep in range(args.epochs):
+        if ep < args.warmup_epochs:
+            # 0 → init_lr を線形
+            lr_now = args.init_lr * float(ep + 1) / float(max(1, args.warmup_epochs))
+        else:
+            # 昇圧後は final_lr を維持
+            lr_now = args.final_lr
+        print(f"[ep {ep+1}/{args.epochs}] current_lr={lr_now:.6f}")
+        _set_lr(optim, lr_now)
         model.train()
         m_logs = []
         for imgs, labels_list, _ in dl_tr:
@@ -808,7 +841,7 @@ def train(args):
         avg = {k: float(np.mean([x[k] for x in m_logs])) for k in m_logs[0].keys()} if m_logs else {"l_box":0,"l_obj":0,"l_cls":0,"n_pos":0}
         print(f"[ep {ep+1}/{args.epochs}] loss: box={avg['l_box']:.3f} obj={avg['l_obj']:.3f} cls={avg['l_cls']:.3f} npos={avg['n_pos']:.1f}")
 
-        eval_conf = min(args.conf_thres, 0.20)  # ここは任意。まずは 0.10〜0.15 も試す価値あり
+        eval_conf = args.conf_thres
         preds = decode_predictions(
             p, args.num_classes, stride=8,
             conf_thres=eval_conf, max_det=args.max_det, topk_per_level=args.topk_per_level,
@@ -823,7 +856,7 @@ def train(args):
             for imgs, labels_list, _ in dl_va:
                 imgs = imgs.to(device)
                 p = eval_model(imgs)
-                eval_conf = min(args.conf_thres, 0.20)  # ここは任意。まずは 0.10〜0.15 も試す価値あり
+                eval_conf = args.conf_thres
                 preds = decode_predictions(
                     p, args.num_classes, stride=8,
                     conf_thres=eval_conf, max_det=args.max_det, topk_per_level=args.topk_per_level,
@@ -903,7 +936,7 @@ def parse_args():
     ap.add_argument("--img-size", type=int, default=640)
     ap.add_argument("--num-classes", type=int, default=3)
     ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--lr", type=float, default=1e-3)
+    #ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
 
@@ -930,6 +963,11 @@ def parse_args():
     # EMA
     ap.add_argument("--ema", action="store_true")
     ap.add_argument("--ema-decay", type=float, default=0.9998)
+
+    ap.add_argument("--warmup-epochs", type=int, default=3)            # 3ep warmup
+    ap.add_argument("--init-lr", type=float, default=1e-3)             # 0.001
+    ap.add_argument("--final-lr", type=float, default=1e-2)            # 0.01
+    ap.add_argument("--val-split", type=float, default=0.20)
 
     # logging
     ap.add_argument("--save-config", action="store_true")
