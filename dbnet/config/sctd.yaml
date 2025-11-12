@@ -1,0 +1,37 @@
+# 必須
+dataset_root: ./dataset/SCTD_yolo
+run_name: SCTD_train
+img_size: 640
+num_classes: 3
+epochs: 50
+batch_size: 32
+workers: 16
+lr: 0.001
+amp: true
+seed: 0
+
+# 評価しきい値
+conf_thres: 0.30
+max_det: 80
+topk_per_level: 400
+
+# Focal Loss（ON/OFFと係数）
+focal_obj: false
+focal_cls: false
+focal_gamma: 1.5
+focal_alpha: 0.25
+
+# アンカー最適化（IoU距離k-means）
+auto_anchors: false           # 学習前に自動適用
+anchors_kmeans_only: false
+anchors_k: 5                 # 小中大を拾うため 5〜6 推奨
+anchors_iters: 1000
+anchors_log: false            # log空間でクラスタ
+anchors_stratified: true     # クラス層化
+
+# EMA
+ema: false
+ema_decay: 0.9998
+
+# ログ
+save_config: true
