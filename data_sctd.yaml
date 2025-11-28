@@ -1,0 +1,10 @@
+# data_sctd.yaml
+path: /home/koki22/detect_mdoels/dataset/SCTD_yolo/runs/SCTD_v1
+
+train: images/train
+val: images/val
+
+names:
+  0: aircraft
+  1: ship
+  2: human

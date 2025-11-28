@@ -63,34 +63,73 @@ def ciou_loss(pred_xywh, tgt_xywh, eps=1e-7):
 # ----------------------------
 class SonarYOLODataset(Dataset):
     def __init__(self, dataset_root, run_name, img_size=640, augment=False):
-        self.root = Path(dataset_root)/"runs"/run_name
-        self.img_dir = self.root/"sonar"
-        self.lbl_dir = self.root/"labels"
+        self.root = Path(dataset_root) / "runs" / run_name
+        self.img_dir = self.root / "sonar"
+        self.lbl_dir = self.root / "labels"
         self.img_size = img_size
         self.augment = augment
-        self.samples = sorted([p for p in self.img_dir.glob("*") if p.suffix.lower() in [".jpg",".png",".jpeg"]])
+        self.samples = sorted([
+            p for p in self.img_dir.glob("*")
+            if p.suffix.lower() in [".jpg", ".png", ".jpeg"]
+        ])
 
-    def __len__(self): return len(self.samples)
+    def __len__(self):
+        return len(self.samples)
 
     def _load_labels(self, stem):
-        p = self.lbl_dir/f"{stem}.txt"
-        if not p.exists(): return torch.zeros((0,5), dtype=torch.float32)
+        p = self.lbl_dir / f"{stem}.txt"
+        if not p.exists():
+            return torch.zeros((0, 5), dtype=torch.float32)
         lines = []
         for line in p.read_text().strip().splitlines():
             ss = line.strip().split()
-            if len(ss) != 5: continue
+            if len(ss) != 5:
+                continue
             c, xc, yc, w, h = map(float, ss)
             lines.append([c, xc, yc, w, h])
         if not lines:
-            return torch.zeros((0,5), dtype=torch.float32)
+            return torch.zeros((0, 5), dtype=torch.float32)
         return torch.tensor(lines, dtype=torch.float32)
 
     def __getitem__(self, i):
         img_path = self.samples[i]
-        # PIL->numpy->torch (Pillowのcopy警告は無視OK)
-        img = Image.open(img_path).convert("RGB").resize((self.img_size,self.img_size))
-        img = torch.from_numpy(np.array(img)).permute(2,0,1).float()/255.0
+        img = Image.open(img_path).convert("RGB")
         labels = self._load_labels(img_path.stem)
+
+        # --- Step 2.5: keep-ratio resize (letterbox) ---
+        def letterbox_keep_ratio(img, target=640, pad_value=114):
+            w0, h0 = img.size
+            scale = target / max(w0, h0)
+            w1, h1 = int(round(w0 * scale)), int(round(h0 * scale))
+            dw, dh = (target - w1) // 2, (target - h1) // 2
+            img_resized = img.resize((w1, h1), Image.BILINEAR)
+            canvas = Image.new("RGB", (target, target), (pad_value,) * 3)
+            canvas.paste(img_resized, (dw, dh))
+            return canvas, dict(scale=scale, dw=dw, dh=dh, W0=w0, H0=h0, target=target)
+
+        img, p = letterbox_keep_ratio(img, target=self.img_size)
+
+        # --- ラベル補正 ---
+        if labels.size(0) > 0:
+            cls = labels[:, 0:1]
+            cx = labels[:, 1] * p["W0"]
+            cy = labels[:, 2] * p["H0"]
+            w = labels[:, 3] * p["W0"]
+            h = labels[:, 4] * p["H0"]
+            cx = (cx * p["scale"] + p["dw"]) / p["target"]
+            cy = (cy * p["scale"] + p["dh"]) / p["target"]
+            w = (w * p["scale"]) / p["target"]
+            h = (h * p["scale"]) / p["target"]
+            labels = torch.from_numpy(
+                np.concatenate([cls, cx[:, None], cy[:, None], w[:, None], h[:, None]], axis=1)
+            ).float()
+        else:
+            labels = torch.zeros((0, 5), dtype=torch.float32)
+
+        # --- 画像テンソル化 ---
+        img = torch.from_numpy(np.array(img, dtype=np.float32)).permute(2, 0, 1) / 255.0
+
+        # 元の仕様と同じく3要素を返す
         return img, labels, str(img_path)
 
 def build_indices_by_class(ds):
@@ -139,25 +178,172 @@ class ConvBNAct(nn.Sequential):
         if p is None: p = k//2
         super().__init__(nn.Conv2d(c1,c2,k,s,p,bias=False), nn.BatchNorm2d(c2), nn.SiLU(True))
 
-class TinyBackbone(nn.Module):
-    def __init__(self, c_in=3, c_out=128):
+class HardSwish(nn.Module):
+    def __init__(self, inplace: bool = True):
         super().__init__()
-        self.stem = ConvBNAct(c_in, 32, 3, 2)  # /2
-        self.b1 = ConvBNAct(32, 64, 3, 2)      # /4
-        self.b2 = ConvBNAct(64, c_out, 3, 2)   # /8
-        self.out_ch = c_out
+        self.act = nn.Hardswish(inplace=inplace)
+
     def forward(self, x):
-        return self.b2(self.b1(self.stem(x)))
+        return self.act(x)
+
+class DepthSepConv(nn.Module):
+    """
+    PP-LCNet 風の depthwise separable conv ブロック
+    """
+    def __init__(self, c_in, c_out, k=3, s=1):
+        super().__init__()
+        p = k // 2
+        self.dw = nn.Conv2d(c_in, c_in, k, s, p, groups=c_in, bias=False)
+        self.dw_bn = nn.BatchNorm2d(c_in)
+        self.pw = nn.Conv2d(c_in, c_out, 1, 1, 0, bias=False)
+        self.pw_bn = nn.BatchNorm2d(c_out)
+        self.act = HardSwish()
+
+    def forward(self, x):
+        x = self.dw(x)
+        x = self.dw_bn(x)
+        x = self.act(x)
+        x = self.pw(x)
+        x = self.pw_bn(x)
+        x = self.act(x)
+        return x
+
+class GhostConv(nn.Module):
+    """
+    GhostNet 風の GhostConv（簡略版）
+    """
+    def __init__(self, c_in, c_out, k=1, s=1, ratio=2):
+        super().__init__()
+        c_prim = int(math.ceil(c_out / ratio))
+        c_cheap = c_out - c_prim
+        p = k // 2
+
+        self.primary = nn.Sequential(
+            nn.Conv2d(c_in, c_prim, k, s, p, bias=False),
+            nn.BatchNorm2d(c_prim),
+            HardSwish(),
+        )
+        self.cheap = nn.Sequential(
+            nn.Conv2d(c_prim, c_cheap, 3, 1, 1, groups=c_prim, bias=False),
+            nn.BatchNorm2d(c_cheap),
+            HardSwish(),
+        )
+
+    def forward(self, x):
+        x1 = self.primary(x)
+        x2 = self.cheap(x1)
+        return torch.cat([x1, x2], dim=1)
+
+
+class GhostBlock(nn.Module):
+    """
+    GhostNet のボトルネックをかなり簡略化したもの
+    stride=2 のときだけ空間分解能を 1/2 にする depthwise conv を挟む
+    """
+    def __init__(self, c_in, c_out, s=1):
+        super().__init__()
+        self.gc = GhostConv(c_in, c_out, k=1, s=1)
+        self.s = s
+        if s == 2:
+            self.dw = nn.Conv2d(c_out, c_out, 3, 2, 1, groups=c_out, bias=False)
+            self.dw_bn = nn.BatchNorm2d(c_out)
+        else:
+            self.dw = None
+        self.act = HardSwish()
+
+    def forward(self, x):
+        x = self.gc(x)
+        if self.dw is not None:
+            x = self.dw(x)
+            x = self.dw_bn(x)
+            x = self.act(x)
+        return x
+
+class SPPF(nn.Module):
+    """
+    YOLOv5/8 系で使われる SPPF の簡略版
+    受容野を広げるためのモジュール
+    """
+    def __init__(self, c_in, c_out, k=5):
+        super().__init__()
+        self.cv1 = ConvBNAct(c_in, c_out, 1, 1)
+        self.cv2 = ConvBNAct(c_out * 4, c_out, 1, 1)
+        self.k = k
+
+    def forward(self, x):
+        x = self.cv1(x)
+        y1 = F.max_pool2d(x, self.k, 1, self.k // 2)
+        y2 = F.max_pool2d(y1, self.k, 1, self.k // 2)
+        y3 = F.max_pool2d(y2, self.k, 1, self.k // 2)
+        return self.cv2(torch.cat([x, y1, y2, y3], dim=1))
+
+# class TinyBackbone(nn.Module):
+#     def __init__(self, c_in=3, c_out=128):
+#         super().__init__()
+#         self.stem = ConvBNAct(c_in, 32, 3, 2)  # /2
+#         self.b1 = ConvBNAct(32, 64, 3, 2)      # /4
+#         self.b2 = ConvBNAct(64, c_out, 3, 2)   # /8
+#         self.out_ch = c_out
+#     def forward(self, x):
+#         return self.b2(self.b1(self.stem(x)))
+
+# class DualBackbone(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.b1 = TinyBackbone(3,128)
+#         self.b2 = TinyBackbone(3,128)
+#         self.merge = ConvBNAct(256, 192, 1, 1)
+#     def forward(self, x):
+#         f1 = self.b1(x); f2 = self.b2(x)
+#         return self.merge(torch.cat([f1,f2],1))  # /8, C=192
+
+class GhostBackbone(nn.Module):
+    """
+    GhostNetベースのバックボーン(future mapはstride=8で出力)
+    入力: 3x640x640 -> 出力: 96x80x80
+    """
+    def __init__(self, c_in=3, c_out=96):
+        super().__init__()
+        self.stem = ConvBNAct(c_in, 16, 3, 2) # /2 -> 16x320x320
+        self.b1 = GhostBlock(16, 48, s=2)   # /4 -> 48x160x160
+        self.b2 = GhostBlock(48, c_out, s=2)   # /8 -> 96x80x80
+        self.sppf = SPPF(c_out, c_out, k=5) # 受容野拡大, 80x80のまま
+        self.out_ch = c_out
+
+    def forward(self, x):
+        return self.sppf(self.b2(self.b1(self.stem(x))))  # /8, C=96
+
+class PPBackbone(nn.Module):
+    """
+    PP-LCNetベースのバックボーン(DepthSepConv+一部5x5)
+    入力: 3x640x640 -> 出力: 96x80x80
+    """
+    def __init__(self, c_in=3, c_out=96):
+        super().__init__()
+        self.stem = ConvBNAct(c_in, 24, 3, 2) # /2 -> 24x320x320
+        self.b1 = DepthSepConv(24, 48, k=3, s=2)   # /4 -> 48x160x160
+        self.b2 = DepthSepConv(48, c_out, k=3, s=2)   # /8 -> 96x80x80
+        self.out_ch = c_out
+
+    def forward(self, x):
+        return self.b2(self.b1(self.stem(x)))  # /8, C=96
 
 class DualBackbone(nn.Module):
+    """
+    GhostBackbone と PPBackbone を並列に通して特徴量を結合する
+    結合後 1x1 Conv で192チャネルに整形(論文の「融合後192ch」相当)
+    """
     def __init__(self):
         super().__init__()
-        self.b1 = TinyBackbone(3,128)
-        self.b2 = TinyBackbone(3,128)
-        self.merge = ConvBNAct(256, 192, 1, 1)
+        self.backbone_ghost = GhostBackbone()
+        self.backbone_pp = PPBackbone()
+        merged_ch = self.backbone_ghost.out_ch + self.backbone_pp.out_ch
+        self.merge = ConvBNAct(merged_ch, 192, 1, 1)
+
     def forward(self, x):
-        f1 = self.b1(x); f2 = self.b2(x)
-        return self.merge(torch.cat([f1,f2],1))  # /8, C=192
+        f1 = self.backbone_ghost(x) # 96 x 80 x 80
+        f2 = self.backbone_pp(x) # 96 x 80 x 80
+        return self.merge(torch.cat([f1, f2], 1))  # 192 x 80 x 80
 
 class SimpleNeck(nn.Module):
     def __init__(self, c=192):
@@ -228,14 +414,36 @@ def assign_targets(labels_list, pshape, num_classes, anchors_grid, stride, img_s
             inter = torch.minimum(gt_anchor[:,0], aw) * torch.minimum(gt_anchor[:,1], ah)
             union = gt_anchor[:,0]*gt_anchor[:,1] + aw*ah - inter + 1e-9
             ious.append(inter/union)
-        ious = torch.stack(ious, 1)
-        best_a = ious.argmax(1)
+        #近傍3x3を正例にをやめる
+        # ious = torch.stack(ious, 1)
+        # best_a = ious.argmax(1)
+
+        # for i in range(lt.size(0)):
+        #     a = int(best_a[i].item())
+        #     # 近傍 3x3 を正例に
+        #     for di in (-1,0,1):
+        #         for dj in (-1,0,1):
+        #             ii = int((gi_idx[i] + di).clamp(0, W-1))
+        #             jj = int((gj_idx[i] + dj).clamp(0, H-1))
+        #             tobj[b,a,jj,ii] = 1.0
+        #             tcls[b,a,jj,ii, gcls[i]] = 1.0
+        #             tbox[b,a,jj,ii] = torch.tensor([gx[i], gy[i], gw[i], gh[i]], device=device)
+
+        ious = torch.stack(ious, 1) # [num_gt, na]
+        #各GTに対して最もIoUの高いアンカーを正例に
+        best_iou, best_a = ious.max(1)
+
+        iou_pos_thr = 0.2
+        pos_radius = 0
 
         for i in range(lt.size(0)):
+            # IoUが閾値未満なら無視
+            if best_iou[i] < iou_pos_thr:
+                continue
+            # 近傍(2*pos_radius+1)^2を正例に
             a = int(best_a[i].item())
-            # 近傍 3x3 を正例に
-            for di in (-1,0,1):
-                for dj in (-1,0,1):
+            for di in range(-pos_radius, pos_radius+1):
+                for dj in range(-pos_radius, pos_radius+1):
                     ii = int((gi_idx[i] + di).clamp(0, W-1))
                     jj = int((gj_idx[i] + dj).clamp(0, H-1))
                     tobj[b,a,jj,ii] = 1.0
@@ -273,9 +481,9 @@ def _set_lr(optimizer, lr: float):
 # Loss
 # ----------------------------
 class DBLoss(nn.Module):
-    def __init__(self, num_classes, box=7.5, obj=1.0, cls=0.5, stride=8, img_size=640,
-                 anchors=[(10,13),(16,30),(33,23)],
-                 focal_obj=False, focal_cls=False, focal_gamma=1.5, focal_alpha=0.25, cls_weight=(1.0, 1.0, 1.0)):
+    def __init__(self, num_classes, box=7.0, obj=1.2, cls=0.5, stride=8, img_size=640,
+                 anchors=[(77, 73), (105, 212), (317, 171), (172, 429), (467, 382)],
+                 focal_obj=False, focal_cls=False, focal_gamma=1.5, focal_alpha=0.25, cls_weight=(1.2, 1.0, 3.0)):
         super().__init__()
         self.register_buffer("cls_weight", torch.tensor(cls_weight, dtype=torch.float32))
         self.lw_box, self.lw_obj, self.lw_cls = box, obj, cls
@@ -349,6 +557,137 @@ class DBLoss(nn.Module):
             "l_cls": float(l_cls.detach()),
             "n_pos": int(n_pos.item()) if hasattr(n_pos, "item") else int(n_pos),
         }
+
+def letterbox_keep_ratio_pil(img, target=640, pad_value=114):
+    """PIL画像をYOLO風に640x640へレターボックス + メタ情報返却"""
+    w0, h0 = img.size
+    scale = target / max(w0, h0)
+    w1 = int(round(w0 * scale))
+    h1 = int(round(h0 * scale))
+    dw = (target - w1) // 2
+    dh = (target - h1) // 2
+
+    img_resized = img.resize((w1, h1), Image.BILINEAR)
+    canvas = Image.new("RGB", (target, target), (pad_value,) * 3)
+    canvas.paste(img_resized, (dw, dh))
+
+    meta = dict(scale=scale, dw=dw, dh=dh, W0=w0, H0=h0, target=target)
+    return canvas, meta
+
+@torch.no_grad()
+def sahi_infer_on_image(
+    model,
+    img_path,
+    device,
+    num_classes=3,
+    img_size=640,
+    patch_size=640,
+    overlap=0.2,
+    conf_thres=0.25,
+    max_det=300,
+    topk_per_level=1000,
+    anchors_px=None,
+    iou_nms=0.5,
+):
+    """
+    大きな滝画像(SSS)に対して SAHI でスライスしながら推論し、元画像座標系で NMS した結果を返す。
+
+    return: boxes [N,4], scores [N], labels [N]
+    """
+    model.eval()
+    img_big = Image.open(img_path).convert("RGB")
+    W_big, H_big = img_big.size
+
+    stride_xy = int(patch_size * (1.0 - overlap))
+    stride_x = max(1, stride_xy)
+    stride_y = max(1, stride_xy)
+
+    all_boxes = []
+    all_scores = []
+    all_labels = []
+
+    # モデルのアンカーを取得（decode_predictionsに渡す）
+    if anchors_px is None:
+        # DetectHeadの anchors をそのまま使う
+        anchors_px = model.head.anchors.detach().cpu().tolist()
+
+    for y0 in range(0, H_big, stride_y):
+        y1 = min(y0 + patch_size, H_big)
+        if y1 - y0 <= 0:
+            continue
+        for x0 in range(0, W_big, stride_x):
+            x1 = min(x0 + patch_size, W_big)
+            if x1 - x0 <= 0:
+                continue
+
+            patch = img_big.crop((x0, y0, x1, y1))  # ローカルパッチ (PIL)
+            patch_w, patch_h = patch.size
+
+            # レターボックスで 640x640 へ
+            patch_lb, meta = letterbox_keep_ratio_pil(patch, target=img_size)
+            scale = meta["scale"]
+            dw = meta["dw"]
+            dh = meta["dh"]
+
+            # テンソル化
+            img_tensor = torch.from_numpy(np.array(patch_lb, dtype=np.float32)).permute(2, 0, 1) / 255.0
+            img_tensor = img_tensor.unsqueeze(0).to(device)
+
+            # 推論
+            p_raw = model(img_tensor)  # [1,na,H,W,D]
+            boxes, scores, labels = decode_predictions(
+                p_raw,
+                num_classes=num_classes,
+                stride=model.stride if hasattr(model, "stride") else 8,
+                conf_thres=conf_thres,
+                max_det=max_det,
+                topk_per_level=topk_per_level,
+                anchors_px=anchors_px,
+            )
+
+            if boxes.numel() == 0:
+                continue
+
+            # decode_predictionsは 640x640 座標系なので、レターボックスとスケールを元に
+            # パッチ内の元座標へ戻す
+            # x,y 共に [dw,dh] を引いてスケールで割る
+            boxes_patch = boxes.clone()
+            # x1,x2
+            boxes_patch[:, [0, 2]] = (boxes_patch[:, [0, 2]] - dw) / max(scale, 1e-9)
+            # y1,y2
+            boxes_patch[:, [1, 3]] = (boxes_patch[:, [1, 3]] - dh) / max(scale, 1e-9)
+
+            # パッチ外にはみ出した分をクリップ
+            boxes_patch[:, 0].clamp_(0, patch_w)
+            boxes_patch[:, 2].clamp_(0, patch_w)
+            boxes_patch[:, 1].clamp_(0, patch_h)
+            boxes_patch[:, 3].clamp_(0, patch_h)
+
+            # 元の大きな画像座標系に平行移動
+            boxes_patch[:, [0, 2]] += x0
+            boxes_patch[:, [1, 3]] += y0
+
+            all_boxes.append(boxes_patch)
+            all_scores.append(scores)
+            all_labels.append(labels)
+
+    if len(all_boxes) == 0:
+        return (
+            torch.zeros((0, 4), device=device),
+            torch.zeros((0,), device=device),
+            torch.zeros((0,), device=device),
+        )
+
+    all_boxes = torch.cat(all_boxes, dim=0)
+    all_scores = torch.cat(all_scores, dim=0)
+    all_labels = torch.cat(all_labels, dim=0)
+
+    # batched NMS でマージ
+    keep = batched_nms(all_boxes, all_scores, all_labels, iou_nms)
+    if keep.numel() > max_det:
+        keep = keep[:max_det]
+
+    return all_boxes[keep], all_scores[keep], all_labels[keep]
 
 # ----------------------------
 # Inference + NMS + mAP(0.5)
@@ -674,6 +1013,33 @@ def kmeans_anchors_wh(dataset_root: str, run_name: str, img_size: int,
     anchors = [(float(round(w)), float(round(h))) for w,h in C_px]
     return anchors
 
+def analyze_anchor_iou(dataset, anchors_px, img_size):
+    all_ious = []
+    for i in range(len(dataset)):
+        _, labels, _ = dataset[i]  # labels: [N,5] (cls,cx,cy,w,h in 0-1)
+        if labels.numel() == 0:
+            continue
+        w = labels[:, 3] * img_size
+        h = labels[:, 4] * img_size
+        wh = torch.stack([w, h], dim=1).cpu().numpy()  # [N,2]
+
+        for bw, bh in wh:
+            best = 0.0
+            for aw, ah in anchors_px:
+                inter = min(bw, aw) * min(bh, ah)
+                union = bw * bh + aw * ah - inter
+                iou = inter / union
+                if iou > best:
+                    best = iou
+            all_ious.append(best)
+
+    all_ious = np.array(all_ious)
+    print(f"[anchor-iou] num={len(all_ious)} "
+          f"mean={all_ious.mean():.3f} "
+          f"median={np.median(all_ious):.3f} "
+          f"ratio_iou<0.2={np.mean(all_ious < 0.2):.3f} "
+          f"ratio_iou<0.1={np.mean(all_ious < 0.1):.3f}")
+
 # ----------------------------
 # EMA
 # ----------------------------
@@ -693,6 +1059,32 @@ class ModelEMA:
                 v.copy_(v * d + msd[k] * (1.0 - d))
             else:
                 v.copy_(msd[k])
+
+
+class HumanFavoredDataset(torch.utils.data.Dataset):
+    def __init__(self, ds, idx_pos_by_cls, idx_empty, p_empty=0.2):
+        self.ds = ds
+        self.idx_human = idx_pos_by_cls[2]  # human を含む index
+        self.idx_ship  = idx_pos_by_cls[1]
+        self.idx_air   = idx_pos_by_cls[0]
+        self.idx_empty = idx_empty
+        self.p_empty = p_empty
+
+    def __len__(self):
+        # 適当に元の train サイズに合わせる
+        return len(self.idx_ship) + len(self.idx_human) + len(self.idx_air)
+
+    def __getitem__(self, _):
+        r = random.random()
+        if r < 0.4 and self.idx_human:          # 40%: human
+            i = random.choice(self.idx_human)
+        elif r < 0.7 and self.idx_air:          # 30%: aircraft
+            i = random.choice(self.idx_air)
+        elif r < 0.9 and self.idx_ship:         # 20%: ship
+            i = random.choice(self.idx_ship)
+        else:                                   # 10%: empty
+            i = random.choice(self.idx_empty) if self.idx_empty else random.choice(self.idx_ship)
+        return self.ds[i]
 
 # ----------------------------
 # Train / Eval
@@ -749,11 +1141,10 @@ def train(args):
         torch.set_num_threads(1)
 
     # curriculum: 空画像20%混ぜる
-    # ds_tr_cur = CurriculumSubset(ds, idx_pos_by_cls, list(tr_empty), p_empty=0.2)
+    ds_tr_cur = HumanFavoredDataset(ds, idx_pos_by_cls, list(tr_empty), p_empty=0.2)
 
     dl_tr = DataLoader(
-        # ds_tr_cur,
-        ds_tr,  
+        ds_tr_cur,
         batch_size=args.batch_size, num_workers=args.workers,
         shuffle=True, sampler=None, collate_fn=collate_fn, pin_memory=True,
         persistent_workers=True, prefetch_factor=4, worker_init_fn=_worker_init_fn,
@@ -775,7 +1166,7 @@ def train(args):
         if args.anchors_kmeans_only:
             return
     else:
-        anchors = [(10,13),(16,30),(33,23)]
+        anchors = [(32, 40), (77, 73), (105, 212), (467, 382)]
 
     # model / loss / opt / ema
     model = DBNet(num_classes=args.num_classes, anchors=anchors).to(device)
@@ -812,6 +1203,16 @@ def train(args):
     for pth in [csv_path, csv_path_mirror]:
         with open(pth, "w", newline="") as f:
             csv.writer(f).writerow(header)
+
+    # 1バッチだけ sanity check（学習ループの前で1回だけ）
+    imgs, lbls_list, _ = next(iter(dl_tr))
+    tot = sum(int(l.size(0)) for l in lbls_list)
+    if tot > 0:
+        all_lbls = torch.cat([l for l in lbls_list if l.numel()], 0)
+        w, h = all_lbls[:,3], all_lbls[:,4]
+        print(f"[sanity] labels: {tot}  w_med={w.median():.3f}  h_med={h.median():.3f} "
+            f"min/max cx={all_lbls[:,1].min():.3f}/{all_lbls[:,1].max():.3f} "
+            f"cy={all_lbls[:,2].min():.3f}/{all_lbls[:,2].max():.3f}")
 
     for ep in range(args.epochs):
         if ep < args.warmup_epochs:
@@ -954,6 +1355,7 @@ def parse_args():
     # anchors
     ap.add_argument("--auto-anchors", action="store_true")
     ap.add_argument("--anchors-kmeans-only", action="store_true")
+    ap.add_argument("--analyze-anchors-only", action="store_true", help="GTと現在のanchorsのIoU分布を解析し終了")
     ap.add_argument("--anchors-k", type=int, default=5)
     ap.add_argument("--anchors-iters", type=int, default=1000)
     ap.add_argument("--anchors-log", action="store_true", help="k-means in log-space")
@@ -968,6 +1370,10 @@ def parse_args():
     ap.add_argument("--init-lr", type=float, default=1e-3)             # 0.001
     ap.add_argument("--final-lr", type=float, default=1e-2)            # 0.01
     ap.add_argument("--val-split", type=float, default=0.20)
+
+    # SAHI
+    ap.add_argument("--sahi-infer", action="store_true", help="大きなSSS滝画像に対してSAHI推論を行うモード")
+    ap.add_argument("--sahi-image", type=str, default="", help="SAHI推論をかけたい元画像パス")
 
     # logging
     ap.add_argument("--save-config", action="store_true")
@@ -991,4 +1397,40 @@ if __name__ == "__main__":
     if args.auto_anchors or args.anchors_kmeans_only:
         if not args.anchors_log: args.anchors_log = True
         if not args.anchors_stratified: args.anchors_stratified = True
+    if args.analyze_anchors_only:
+        dataset = SonarYOLODataset(args.dataset_root, args.run_name, args.img_size, augment=False)
+        anchors_px = [
+            (93, 198),   # human / 小さめターゲット（縦長）
+            (299, 133),  # 中規模 ship（横長）
+            (504, 477),  # 画面の大半を占める巨大 ship / aircraft
+        ]  # or kmeansで出したもの
+        analyze_anchor_iou(dataset, anchors_px, img_size=args.img_size)
+        import sys
+        sys.exit(0)
+     # SAHI推論だけしたい場合（学習せずに終了）
+    if args.sahi_infer:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        anchors = [(32, 40), (77, 73), (105, 212), (467, 382)]  # 学習時と揃える
+        model = DBNet(num_classes=args.num_classes, anchors=anchors).to(device)
+        # ここで学習済み重みをロード
+        ckpt = torch.load(args.weights, map_location=device)
+        model.load_state_dict(ckpt["model"])
+
+        boxes, scores, labels = sahi_infer_on_image(
+            model,
+            args.sahi_image,
+            device,
+            num_classes=args.num_classes,
+            img_size=args.img_size,
+            patch_size=args.img_size,
+            overlap=0.2,
+            conf_thres=args.conf_thres,
+            max_det=args.max_det,
+            topk_per_level=args.topk_per_level,
+        )
+
+        print("SAHI detections:", len(boxes))
+        # ここで可視化やCSV保存など、好きな処理を追加
+        import sys
+        sys.exit(0)
     train(args)
