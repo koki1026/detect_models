@@ -1,11 +1,7 @@
-# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+# Ultralytics 🚀 DBNet-like dual-backbone model for SCTD
 
-# Ultralytics YOLOv8 object detection model with P3/8 - P5/32 outputs
-# Model docs: https://docs.ultralytics.com/models/yolov8
-# Task docs: https://docs.ultralytics.com/tasks/detect
+nc: 3  # SCTD: aircraft, ship, human
 
-# Parameters
-nc: 80 # number of classes
 scales: # model compound scaling constants, i.e. 'model=yolov8n.yaml' will call yolov8.yaml with scale 'n'
   # [depth, width, max_channels]
   n: [0.33, 0.25, 1024] # YOLOv8n summary: 129 layers, 3157200 parameters, 3157184 gradients, 8.9 GFLOPS
@@ -14,36 +10,77 @@ scales: # model compound scaling constants, i.e. 'model=yolov8n.yaml' will call 
   l: [1.00, 1.00, 512] # YOLOv8l summary: 209 layers, 43691520 parameters, 43691504 gradients, 165.7 GFLOPS
   x: [1.00, 1.25, 512] # YOLOv8x summary: 209 layers, 68229648 parameters, 68229632 gradients, 258.5 GFLOPS
 
-# YOLOv8.0n backbone
+# ----------------------------------------------------------------------
+# Dual Backbone
+#   - 0〜2: 共通 shallow stem
+#   - 3〜8: Branch-A (GhostNet-like)
+#   - 9〜14: Branch-B (PP-LCNet-like)
+#   - 15〜21: 各スケールの融合 + SPPF
+#   出力: P3(16), P4(18), P5(21)
+# ----------------------------------------------------------------------
+
 backbone:
   # [from, repeats, module, args]
-  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
-  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
-  - [-1, 3, C2f, [128, True]]
-  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8
-  - [-1, 6, C2f, [256, True]]
-  - [-1, 1, Conv, [512, 3, 2]] # 5-P4/16
-  - [-1, 6, C2f, [512, True]]
-  - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32
-  - [-1, 3, C2f, [1024, True]]
-  - [-1, 1, SPPF, [1024, 5]] # 9
 
-# YOLOv8.0n head
+  # shared stem
+  - [-1, 1, Conv, [32, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv, [64, 3, 2]] # 1-P2/4
+  - [-1, 3, C2f, [64, True]] # 2 shared low-level features
+
+  # Branch-A (GhostNet-like)
+  - [-1, 1, Conv, [128, 3, 2]] # 3-P3/8
+  - [-1, 2, GhostBottleneck, [128]] # 4
+  - [-1, 1, Conv, [256, 3, 2]] # 5-P4/16
+  - [-1, 4, GhostBottleneck, [256]] # 6
+  - [-1, 1, Conv, [512, 3, 2]] # 7-P5/32
+  - [-1, 2, GhostBottleneck, [512]] # 8
+
+  # Branch-B (PP-LCNet-like)
+  - [2, 1, Conv, [128, 3, 2]] # 9-P3/8 from shared layer 2
+  - [-1, 2, C2f, [128, True]] # 10
+  - [-1, 1, Conv, [256, 3, 2]] # 11-P4/16
+  - [-1, 4, C2f, [256, True]] # 12
+  - [-1, 1, Conv, [512, 3, 2]] # 13-P5/32
+  - [-1, 2, C2f, [512, True]] # 14
+
+  # FPN fusion P3-P5
+  - [[4, 10], 1, Concat, [1]] # 15-P3 fuse Branch-A and Branch-B
+  - [-1, 1, C3Ghost, [256]] # 16 P3 output
+
+  - [[6, 12], 1, Concat, [1]] # 17-P4 fuse Branch-A and Branch-B
+  - [-1, 1, C3Ghost, [512]] # 18 P4 output
+
+  - [[8, 14], 1, Concat, [1]] # 19-P5 fuse Branch-A and Branch-B
+  - [-1, 1, C3Ghost, [1024]] # 20
+  - [-1, 1, SPPF, [1024, 5]] # 21 P5 output
+
+
+# ----------------------------------------------------------------------
+# Head: C3Ghost FPN + YOLOv8 Detect
+#   入力: P3(16), P4(18), P5(21)
+#   出力: Detect(P3, P4, P5)
+# ----------------------------------------------------------------------
 head:
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 6], 1, Concat, [1]] # cat backbone P4
-  - [-1, 3, C3Ghost, [512]] # 12
+  # 上から下へ：P5 -> P4 -> P3
+  - [21, 1, Conv, [512, 1, 1]] # 22
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']] # 23
+  - [[-1, 18], 1, Concat, [1]] #24 P4 merge
+  - [-1, 3, C3Ghost, [512]] # 25 P4 head features
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 4], 1, Concat, [1]] # cat backbone P3
-  - [-1, 3, C3Ghost, [256]] # 15 (P3/8-small)
+  - [-1, 1, Conv, [256, 1, 1]] # 26
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']] # 27
+  - [[-1, 16], 1, Concat, [1]] #28 P3 merge
+  - [-1, 3, C3Ghost, [256]] # 29 P3 head features
 
-  - [-1, 1, Conv, [256, 3, 2]]
-  - [[-1, 12], 1, Concat, [1]] # cat head P4
-  - [-1, 3, C3Ghost, [512]] # 18 (P4/16-medium)
+  # P3 -> downsample -> P4
+  - [-1, 1, Conv, [256, 3, 2]] # 30
+  - [[-1, 25], 1, Concat, [1]] # 31 P4 merge
+  - [-1, 3, C3Ghost, [512]] # 32 P4 head features
 
-  - [-1, 1, Conv, [512, 3, 2]]
-  - [[-1, 9], 1, Concat, [1]] # cat head P5
-  - [-1, 3, C3Ghost, [1024]] # 21 (P5/32-large)
+  # P4 -> downsample -> P5
+  - [-1, 1, Conv, [512, 3, 2]] # 33
+  - [[-1, 20], 1, Concat, [1]] # 34 P5 merge
+  - [-1, 3, C3Ghost, [1024]] # 35 P5 head features
 
-  - [[15, 18, 21], 1, Detect, [nc]] # Detect(P3, P4, P5)
+  # Detect(P3, P4, P5)
+  - [[29, 32, 35], 1, Detect, [nc]]  # 36
