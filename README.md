@@ -1,4 +1,6 @@
 ## install
+### 仮想環境を構築
+./setup_env.sh
 ### venvを有効化
 source .venv/bin/activate
 ### 依存ライブラリをインストール
@@ -24,4 +26,5 @@ name="exp3_fastc2f_assf_50ep",
 plots=True,        # （今のまま SciPy エラー出ても気にしないならそのまま）
 #device=0,          # 明示してもOK
 workers=8,         # デフォルトのままでもOK
+
 
