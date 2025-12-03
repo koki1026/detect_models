@@ -1,0 +1,11 @@
+torch>=2.1
+torchvision>=0.16
+torchaudio
+ultralytics==8.1.25
+numpy
+opencv-python
+matplotlib
+pandas
+pyyaml
+tqdm
+sahi

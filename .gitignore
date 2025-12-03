@@ -7,3 +7,4 @@ runs_ssyolo
 yolo11n.pt
 analysis
 __pycache__
+.venv
