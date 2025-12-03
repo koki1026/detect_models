@@ -7,6 +7,8 @@
 custom_imports:
   - path: custom_layers/fastc2f.py
     name: FastC2f
+  - path: custom_layers/assf.py
+    name: ASSF
 
 # Parameters
 nc: 3 # number of classes

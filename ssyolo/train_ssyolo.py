@@ -13,11 +13,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from custom_layers.fastc2f import FastC2f
-
+from custom_layers.assf import ASSF
+from custom_layers.detect_assf import DetectASSF
 
 # ★ Ultralytics の名前空間に FastC2f を登録
 um.FastC2f = FastC2f
 ut.FastC2f = FastC2f
+
+# ★ Ultralytics の名前空間に ASSF を登録
+um.ASSF = ASSF
+ut.ASSF = ASSF
+
+um.Detect = DetectASSF
+ut.Detect = DetectASSF
 
 
 def main():
@@ -37,12 +45,12 @@ def main():
         momentum=0.937,
         weight_decay=0.0005,
         #cosine=True,         # コサインスケジュール（好みだけど有り）
-        patience=50,         # 早期終了。mAPが全然伸びなくなったら止めてくれる
+        patience=30,         # 早期終了。mAPが全然伸びなくなったら止めてくれる
         project="runs_ssyolo",
-        name="exp2_fastc2f_200ep",
+        name="exp3_fastc2f_assf_50ep",
         plots=True,        # （今のまま SciPy エラー出ても気にしないならそのまま）
         # device=0,          # 明示してもOK
-        # workers=8,         # デフォルトのままでもOK
+        workers=8,         # デフォルトのままでもOK
     )
 
 if __name__ == "__main__":
