@@ -36,7 +36,7 @@ def main():
 
     model.train(
         data=str(data_cfg),
-        epochs=1,          # ★ 本気学習
+        epochs=200,          # ★ 本気学習
         imgsz=640,           # 最初は 640 のままでOK（960 は後で）
         batch=4,             # 8GB なので 8 が安全圏。16 はたぶんアウト
         optimizer="SGD",     # 論文準拠
@@ -47,7 +47,7 @@ def main():
         #cosine=True,         # コサインスケジュール（好みだけど有り）
         patience=30,         # 早期終了。mAPが全然伸びなくなったら止めてくれる
         project="runs_ssyolo",
-        name="exp0_test",
+        name="exp3_fastc2f_assf_200ep",
         amp=False, 
         plots=True,        # （今のまま SciPy エラー出ても気にしないならそのまま）
         # device=0,          # 明示してもOK
