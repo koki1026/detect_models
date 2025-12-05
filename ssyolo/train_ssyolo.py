@@ -38,7 +38,11 @@ def main():
         data=str(data_cfg),
         epochs=200,          # ★ 本気学習
         imgsz=640,           # 最初は 640 のままでOK（960 は後で）
+<<<<<<< Updated upstream
         batch=8,             # 8GB なので 8 が安全圏。16 はたぶんアウト
+=======
+        batch=2,             # 8GB なので 8 が安全圏。16 はたぶんアウト
+>>>>>>> Stashed changes
         optimizer="SGD",     # 論文準拠
         lr0=0.01,            # 初期学習率 (Table 2)
         lrf=0.1,             # 最終 lr = lr0 * lrf
