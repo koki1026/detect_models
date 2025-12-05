@@ -1,5 +1,5 @@
 # data_sctd.yaml
-path: /home/koki22/detect_mdoels/dataset/SCTD_yolo/runs/SCTD_v1
+path: /home/ktr/koki/detect_models/dataset/SCTD_yolo/runs/SCTD_v1
 
 train: images/train
 val: images/val
