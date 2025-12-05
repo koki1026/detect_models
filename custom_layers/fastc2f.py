@@ -110,10 +110,22 @@ class FastC2f(nn.Module):
         if isinstance(c2, (list, tuple)):
             c2 = c2[0]
 
+        # Ultralytics の scales が壊してきてもここで矯正する
         self.c2 = int(c2)
-        self.e = float(e)
-        self.ratio = ratio
+        
+        # shortcut は float/int で来ても bool に落とす
+        if isinstance(shortcut, (int, float)):
+            shortcut = bool(shortcut)
         self.shortcut = shortcut
+        
+        # g も float で来ても int に
+        self.g = int(g)
+        
+        # ratio は念の為 float に
+        self.ratio = float(ratio)
+        self.block = None
+        self.cv2 = None
+        self.e = float(e)
 
         self._built = False  # lazy build フラグ
 
