@@ -13,6 +13,11 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### yoloのdataset_directryをローカル環境に合わせて変更
+```
+yolo settings datasets_dir=/home/YourPC/detect_models
+```
+
 ## 実行
 ```
 source .venv/bin/activate  # まだなら
@@ -37,4 +42,5 @@ plots=True,        # （今のまま SciPy エラー出ても気にしないな�
 #device=0,          # 明示してもOK
 workers=8,         # デフォルトのままでもOK
 ```
+
 
