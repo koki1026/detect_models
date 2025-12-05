@@ -5,6 +5,7 @@ runs_yolov8
 runs_dbnet_yolo
 runs_ssyolo
 yolo11n.pt
+yolov8n.pt
 analysis
 __pycache__
 .venv

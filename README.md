@@ -1,7 +1,8 @@
 ## install
 ### 仮想環境を構築
 ```
-./setup_env.sh
+cd ~/detect_models
+python3 -m venv .venv
 ```
 ### venvを有効化
 ```
@@ -36,3 +37,4 @@ plots=True,        # （今のまま SciPy エラー出ても気にしないな�
 #device=0,          # 明示してもOK
 workers=8,         # デフォルトのままでもOK
 ```
+
