@@ -1,15 +1,24 @@
 ## install
 ### 仮想環境を構築
+```
 ./setup_env.sh
+```
 ### venvを有効化
+```
 source .venv/bin/activate
+```
 ### 依存ライブラリをインストール
+```
 pip install -r requirements.txt
+```
 
 ## 実行
+```
 source .venv/bin/activate  # まだなら
 python3 ssyolo/train_ssyolo.py
+```
 ### ハイパーパラメータ
+```
 data=str(data_cfg), 
 epochs=200,          # ★ 本気学習
 imgsz=640,           # 最初は 640 のままでOK（960 は後で）
@@ -26,5 +35,4 @@ name="exp3_fastc2f_assf_50ep",
 plots=True,        # （今のまま SciPy エラー出ても気にしないならそのまま）
 #device=0,          # 明示してもOK
 workers=8,         # デフォルトのままでもOK
-
-
+```
