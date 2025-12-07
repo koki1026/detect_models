@@ -51,7 +51,7 @@ def main():
         #cosine=True,         # コサインスケジュール（好みだけど有り）
         patience=30,         # 早期終了。mAPが全然伸びなくなったら止めてくれる
         project="runs_ssyolo",
-        name="exp4_detectSA_test",
+        name="exp4_fastc2f_fix_200ep",
         amp=False, 
         plots=True,        # （今のまま SciPy エラー出ても気にしないならそのまま）
         # device=0,          # 明示してもOK
