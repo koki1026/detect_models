@@ -4,6 +4,8 @@
 # Model docs: https://docs.ultralytics.com/models/yolov8
 # Task docs: https://docs.ultralytics.com/tasks/detect
 
+task: detect
+
 custom_imports:
   - path: custom_layers/fastc2f.py
     name: FastC2f
