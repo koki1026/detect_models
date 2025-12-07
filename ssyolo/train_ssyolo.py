@@ -40,8 +40,8 @@ def main():
 
     model.train(
         data=str(data_cfg),
-        epochs=1,          # ★ 本気学習
-        imgsz=640,           # 最初は 640 のままでOK（960 は後で）
+        epochs=50,          # ★ 本気学習
+        imgsz=960,           # 最初は 640 のままでOK（960 は後で）
         batch=1,             # 8GB なので 8 が安全圏。16 はたぶんアウト
         optimizer="SGD",     # 論文準拠
         lr0=0.01,            # 初期学習率 (Table 2)
@@ -51,7 +51,7 @@ def main():
         #cosine=True,         # コサインスケジュール（好みだけど有り）
         patience=30,         # 早期終了。mAPが全然伸びなくなったら止めてくれる
         project="runs_ssyolo",
-        name="exp4_fastc2f_fix_200ep",
+        name="exp5_detectSA_fix_50ep_960",
         amp=False, 
         plots=True,        # （今のまま SciPy エラー出ても気にしないならそのまま）
         # device=0,          # 明示してもOK
