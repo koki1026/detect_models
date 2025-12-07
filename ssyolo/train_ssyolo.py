@@ -36,7 +36,7 @@ def main():
 
     model.train(
         data=str(data_cfg),
-        epochs=50,          # ★ 本気学習
+        epochs=200,          # ★ 本気学習
         imgsz=640,           # 最初は 640 のままでOK（960 は後で）
         batch=1,             # 8GB なので 8 が安全圏。16 はたぶんアウト
         optimizer="SGD",     # 論文準拠

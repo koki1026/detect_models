@@ -135,8 +135,8 @@ class ASSF(nn.Module):
         f5 = F.interpolate(f5_mid, size=x5.shape[-2:], mode="nearest")
 
         # ---- 最終整形 Conv + BN + SiLU ----
-        p3_out = self.act(self.out_bn3(self.out3(f3)))
-        p4_out = self.act(self.out_bn4(self.out4(f4)))
-        p5_out = self.act(self.out_bn5(self.out5(f5)))
+        p3_out = self.act(self.out_bn3(self.out3(f3)) + p3)
+        p4_out = self.act(self.out_bn4(self.out4(f4)) + p4)
+        p5_out = self.act(self.out_bn5(self.out5(f5)) + p5)
 
         return p3_out, p4_out, p5_out
