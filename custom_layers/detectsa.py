@@ -8,19 +8,19 @@ from ultralytics.nn.modules import Conv  # YOLOv8 と同じ Conv を使う
 from custom_layers.assf import ASSF
 
 
-class LocalMHSA2D(nn.Module):
+class GlobalMHSA2D(nn.Module):
     """
-    メモリ効率を意識した 2D feature map 用 Multi-Head Self-Attention.
+    Global Multi-Head Self-Attention for 2D feature maps.
+
     - 入力: (B, C, H, W)
-    - 出力: 同じ shape
-    - グローバル全画素ではなく、小さなウィンドウごとに MHSA をかける
+    - 出力: (B, C, H, W) 同じ shape
+    - HxW 全体を 1 シーケンス (N = H*W) として扱う
     """
 
-    def __init__(self, c: int, num_heads: int = 4, window_size: int = 8):
+    def __init__(self, c: int, num_heads: int = 4):
         super().__init__()
         self.c = c
         self.num_heads = num_heads
-        self.window_size = window_size
 
         # batch_first=True で (B, N, C)
         self.attn = nn.MultiheadAttention(
@@ -34,39 +34,14 @@ class LocalMHSA2D(nn.Module):
         x: [B, C, H, W]
         """
         b, c, h, w = x.shape
-        ws = self.window_size
+        # (B, C, H, W) -> (B, N, C)
+        x_seq = x.view(b, c, h * w).permute(0, 2, 1).contiguous()  # (B, N, C)
 
-        # H, W を window_size の倍数にパディング
-        pad_h = (ws - h % ws) % ws
-        pad_w = (ws - w % ws) % ws
-        if pad_h or pad_w:
-            # F.pad の引数順: (left, right, top, bottom)
-            x = F.pad(x, (0, pad_w, 0, pad_h))
-        b, c, h2, w2 = x.shape
+        # Global MHSA
+        y, _ = self.attn(x_seq, x_seq, x_seq)  # (B, N, C)
 
-        # (B, C, H2, W2) -> (B, C, nH, ws, nW, ws)
-        n_h = h2 // ws
-        n_w = w2 // ws
-        x = x.view(b, c, n_h, ws, n_w, ws)
-
-        # -> (B, nH, nW, ws, ws, C)
-        x = x.permute(0, 2, 4, 3, 5, 1).contiguous()
-
-        # 各 window を1シーケンスにまとめて MultiheadAttention
-        # (B * nH * nW, ws*ws, C)
-        x = x.view(b * n_h * n_w, ws * ws, c)
-
-        y, _ = self.attn(x, x, x)
-
-        # もとの window 形状に戻す
-        y = y.view(b, n_h, n_w, ws, ws, c)
-        y = y.permute(0, 5, 1, 3, 2, 4).contiguous()
-        y = y.view(b, c, h2, w2)
-
-        # パディング部分を除去
-        if pad_h or pad_w:
-            y = y[:, :, :h, :w]
-
+        # (B, N, C) -> (B, C, H, W)
+        y = y.permute(0, 2, 1).contiguous().view(b, c, h, w)
         return y
 
 
@@ -110,7 +85,6 @@ class DetectSA(um.Detect):
         inplace: bool = True,
         num_heads: int = 2,
         attn_ratio: float = 0.125,
-        window_size: int = 8,
     ):
         # ch は backbone/neck からの (C3, C4, C5) を想定
         assert len(ch) == 3, f"DetectSA expects 3 feature maps, got {ch}"
@@ -140,7 +114,7 @@ class DetectSA(um.Detect):
 
         # Local Window MHSA
         self.mhsa = nn.ModuleList(
-            [LocalMHSA2D(c2, num_heads=num_heads, window_size=window_size)
+            [GlobalMHSA2D(c2, num_heads=num_heads)
              for c2 in c2_list]
         )
 
@@ -152,7 +126,7 @@ class DetectSA(um.Detect):
         # shortcut 用の 1x1 Conv (shape を合わせる)
         # act=False にしておくと、完全に恒等射に近い振る舞いになる
         self.short = nn.ModuleList(
-            [Conv(c1, c1, 1, 1, act=False) for c1 in self.ch]
+            [nn.Identity() for _ in self.ch]
         )
 
     def forward(self, x):

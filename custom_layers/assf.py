@@ -171,4 +171,4 @@ class ASSF(nn.Module):
         p5_out = self.act(self.out_bn5(self.out5(f5)) + r5)
 
 
-        return p3_out + x[0], p4_out + x[1], p5_out + x[2]
+        return p3_out, p4_out, p5_out

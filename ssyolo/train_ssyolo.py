@@ -50,7 +50,7 @@ def main():
         #cosine=True,         # コサインスケジュール（好みだけど有り）
         patience=30,         # 早期終了。mAPが全然伸びなくなったら止めてくれる
         project="runs_ssyolo",
-        name="exp5_detectSA_ASSF_v200_1ep_test",
+        name="exp5_detectSA_ASSF_v201_1ep_test",
         amp=False, 
         plots=True,        # （今のまま SciPy エラー出ても気にしないならそのまま）
         workers=8,         # デフォルトのままでもOK
