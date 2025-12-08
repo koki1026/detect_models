@@ -14,7 +14,6 @@ if str(ROOT) not in sys.path:
 
 from custom_layers.fastc2f import FastC2f
 from custom_layers.assf import ASSF
-from custom_layers.detect_assf import DetectASSF
 from custom_layers.detectsa import DetectSA
 
 # ★ Ultralytics の名前空間に FastC2f を登録
@@ -40,9 +39,9 @@ def main():
 
     model.train(
         data=str(data_cfg),
-        epochs=50,          # ★ 本気学習
-        imgsz=960,           # 最初は 640 のままでOK（960 は後で）
-        batch=1,             # 8GB なので 8 が安全圏。16 はたぶんアウト
+        epochs=1,          # ★ 本気学習
+        imgsz=640,           # 最初は 640 のままでOK（960 は後で）
+        batch=2,             # 8GB なので 8 が安全圏。16 はたぶんアウト
         optimizer="SGD",     # 論文準拠
         lr0=0.01,            # 初期学習率 (Table 2)
         lrf=0.1,             # 最終 lr = lr0 * lrf
@@ -51,11 +50,11 @@ def main():
         #cosine=True,         # コサインスケジュール（好みだけど有り）
         patience=30,         # 早期終了。mAPが全然伸びなくなったら止めてくれる
         project="runs_ssyolo",
-        name="exp5_detectSA_fix_50ep_960",
+        name="exp5_detectSA_ASSF_v200_1ep_test",
         amp=False, 
         plots=True,        # （今のまま SciPy エラー出ても気にしないならそのまま）
-        # device=0,          # 明示してもOK
         workers=8,         # デフォルトのままでもOK
+        nbs=8, 
     )
 
 if __name__ == "__main__":

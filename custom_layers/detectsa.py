@@ -88,18 +88,19 @@ class ConvFFN(nn.Module):
         return x + y
 
 
+# custom_layers/detectsa.py の DetectSA 部分だけ差し替え
+
 class DetectSA(um.Detect):
     """
-    論文 Figure 6 の「Memory-efficient self-attention」に近づけた Detect ヘッド。
+    ASSF → (Conv1x1 -> MHSA -> Conv1x1 + shortcut) だけを挟んだ「置き換え head」に近い Detect。
 
-    - ASSF で 3スケール特徴を融合
+    - ASSF で 3スケール特徴を融合して (C, C, C) に統一
     - 各スケールごとに:
         1) 1x1 Conv で C1 -> C2 に圧縮
-        2) LocalMHSA2D で window attention
-        3) 1x1 Conv で C2 -> C1 に拡張
-        4) shortcut Conv との residual
-        5) ConvFFN による FFN + residual
-    - その出力を親クラス Detect に渡す
+        2) LocalMHSA2D で (ローカル) self-attention
+        3) 1x1 Conv で C2 -> C1 に戻す
+        4) 1x1 Conv による shortcut と residual add
+    - ここでは FFN は入れず、論文 Figure 6 の構造に寄せる
     """
 
     def __init__(
@@ -107,27 +108,26 @@ class DetectSA(um.Detect):
         nc: int = 80,
         ch=(),
         inplace: bool = True,
-        num_heads: int = 4,
-        attn_ratio: float = 0.25,
+        num_heads: int = 2,
+        attn_ratio: float = 0.125,
         window_size: int = 8,
-        ffn_ratio: float = 2.0,
     ):
-        # ch は backbone/neck からの (C3, C4, C5) = (256, 512, 1024) 想定
+        # ch は backbone/neck からの (C3, C4, C5) を想定
         assert len(ch) == 3, f"DetectSA expects 3 feature maps, got {ch}"
         c3, c4, c5 = ch
 
-        # ASSF で揃える出力チャネル数（ここでは P3 と同じ 256）
+        # ASSF で揃える出力チャネル数（ここでは P3 と同じ C3）
         c_out = c3
 
-        # Detect 側には「ASSF 後」のチャネル (256, 256, 256) を渡す
+        # Detect 側には「ASSF 後」のチャネル (c_out, c_out, c_out) を渡す
         ch_assf = (c_out, c_out, c_out)
         super().__init__(nc=nc, ch=ch_assf)
 
-        # ASSF 本体（入力は元の 256, 512, 1024）
+        # ASSF 本体（入力は元の c3, c4, c5）
         self.assf = ASSF(c3=c3, c4=c4, c5=c5, c_out=c_out)
 
         self.nl = len(ch_assf)
-        self.ch = list(ch_assf)  # = [256, 256, 256]
+        self.ch = list(ch_assf)  # = [c_out, c_out, c_out]
 
         # ---- Self-Attention 用のチャネル圧縮設定 ----
         # C2 = max(8, int(C1 * attn_ratio))
@@ -150,42 +150,40 @@ class DetectSA(um.Detect):
         )
 
         # shortcut 用の 1x1 Conv (shape を合わせる)
+        # act=False にしておくと、完全に恒等射に近い振る舞いになる
         self.short = nn.ModuleList(
-            [Conv(c1, c1, 1, 1) for c1 in self.ch]
-        )
-
-        # FFN
-        self.ffn = nn.ModuleList(
-            [ConvFFN(c1, expansion=ffn_ratio) for c1 in self.ch]
+            [Conv(c1, c1, 1, 1, act=False) for c1 in self.ch]
         )
 
     def forward(self, x):
         """
-        x: [P3, P4, P5] with channels (256, 512, 1024) from the neck
+        x: [P3, P4, P5] with channels (C3, C4, C5) from the neck
         """
         assert isinstance(x, (list, tuple)) and len(x) == self.nl, \
             f"Expected {self.nl} feature maps, got {len(x)}"
 
-        # 1) ASSF で multi-scale fusion & channel unify (→ 3 枚とも 256ch)
+        # 1) ASSF で multi-scale fusion & channel unify (→ 3 枚とも C_out ch)
         p3, p4, p5 = self.assf(x)
         x_assf = [p3, p4, p5]
 
-        # 2) Self-Attention + 3) FFN
+        # 2) Self-Attention ブロック
         attn_feats = []
         for i, xi in enumerate(x_assf):
-            # SA ブロック
-            y = self.reduce[i](xi)       # C1 -> C2
-            y = self.mhsa[i](y)         # local window attention
-            y = self.expand[i](y)       # C2 -> C1
+            # Conv1x1 でチャンネル圧縮 C1 -> C2
+            y = self.reduce[i](xi)
 
-            # shortcut + residual
+            # Local Window MHSA
+            y = self.mhsa[i](y)
+
+            # Conv1x1 で C2 -> C1
+            y = self.expand[i](y)
+
+            # shortcut + residual (Conv1x1 で shape を合わせたうえで add)
             skip = self.short[i](xi)
             y = y + skip
-
-            # FFN ブロック (residual 内部で add)
-            y = self.ffn[i](y)
 
             attn_feats.append(y)
 
         # 3) 最後に YOLO Detect へ
+        #   → 親クラス Detect の中身は「最終予測用の Conv 群」のみを使うイメージ
         return super().forward(attn_feats)
