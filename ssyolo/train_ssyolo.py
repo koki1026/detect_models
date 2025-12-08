@@ -36,12 +36,14 @@ def main():
     data_cfg = ROOT / "data_sctd.yaml"
 
     model = YOLO(str(model_cfg), task="detect")
+    
+    model.model.info(imgsz=640, verbose=True)
 
     model.train(
         data=str(data_cfg),
-        epochs=1,          # ★ 本気学習
+        epochs=200,          # ★ 本気学習
         imgsz=640,           # 最初は 640 のままでOK（960 は後で）
-        batch=2,             # 8GB なので 8 が安全圏。16 はたぶんアウト
+        batch=16,             # 8GB なので 8 が安全圏。16 はたぶんアウト
         optimizer="SGD",     # 論文準拠
         lr0=0.01,            # 初期学習率 (Table 2)
         lrf=0.1,             # 最終 lr = lr0 * lrf
@@ -54,7 +56,7 @@ def main():
         amp=False, 
         plots=True,        # （今のまま SciPy エラー出ても気にしないならそのまま）
         workers=8,         # デフォルトのままでもOK
-        nbs=8, 
+        # nbs=8, 
     )
 
 if __name__ == "__main__":
