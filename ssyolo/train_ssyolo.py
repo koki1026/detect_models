@@ -41,18 +41,18 @@ def main():
 
     model.train(
         data=str(data_cfg),
-        epochs=200,          # ★ 本気学習
-        imgsz=640,           # 最初は 640 のままでOK（960 は後で）
-        batch=16,             # 8GB なので 8 が安全圏。16 はたぶんアウト
+        epochs=1,          # ★ 本気学習
+        imgsz=960,           # 最初は 640 のままでOK（960 は後で）
+        batch=8,             # 8GB なので 8 が安全圏。16 はたぶんアウト
         optimizer="SGD",     # 論文準拠
         lr0=0.01,            # 初期学習率 (Table 2)
         lrf=0.1,             # 最終 lr = lr0 * lrf
         momentum=0.937,
         weight_decay=0.0005,
         #cosine=True,         # コサインスケジュール（好みだけど有り）
-        patience=30,         # 早期終了。mAPが全然伸びなくなったら止めてくれる
+        patience=300,         # 早期終了。mAPが全然伸びなくなったら止めてくれる
         project="runs_ssyolo",
-        name="exp5_detectSA_ASSF_v201_1ep_test",
+        name="exp5_detectSA_ASSF_v203_300ep_960_8",
         amp=False, 
         plots=True,        # （今のまま SciPy エラー出ても気にしないならそのまま）
         workers=8,         # デフォルトのままでもOK
