@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import os
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
+
 import argparse
 from pathlib import Path
 import yaml
@@ -10,6 +14,31 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from ultralytics import YOLO
+
+import sys
+from pathlib import Path
+
+FILE = Path(__file__).resolve()
+ROOT = FILE.parents[1]          # ~/detect_models を想定（tools/ の1つ上）
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+def register_custom_layers_for_ssyolo():
+    import ultralytics.nn.modules as um
+    import ultralytics.nn.tasks as ut
+
+    from custom_layers.fastc2f import FastC2f
+    from custom_layers.assf import ASSF
+    from custom_layers.detectsa import DetectSA
+
+    um.FastC2f = FastC2f
+    ut.FastC2f = FastC2f
+
+    um.ASSF = ASSF
+    ut.ASSF = ASSF
+
+    um.DetectSA = DetectSA
+    ut.DetectSA = DetectSA
 
 
 # ----------------------------
@@ -298,6 +327,7 @@ def main():
 
     # Load models
     yolo8 = YOLO(str(Path(args.yolo8_weights).expanduser()))
+    register_custom_layers_for_ssyolo()
     ssyolo = YOLO(str(Path(args.ssyolo_weights).expanduser()))
     dbnet = YOLO(str(Path(args.dbnet_weights).expanduser()))
 
