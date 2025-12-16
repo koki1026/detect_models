@@ -1,0 +1,11 @@
+# data_Ijira.yaml
+path: dataset/Ijira
+
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: aircraft
+  1: ship
+  2: human
